@@ -253,7 +253,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## Support
 
 - GitHub Issues: https://github.com/ayammaximilian/socketflow/issues
-- Documentation: https://socketflow.readthedocs.io/
+- Documentation: https://socketflow.dev/
 
 ## Requirements
 
