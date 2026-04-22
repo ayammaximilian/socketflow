@@ -22,6 +22,8 @@ A high-performance, dependency-free TCP networking library for Python with advan
 pip install socketflow
 ```
 
+**Full documentation available at:** https://socketflow.dev/
+
 Or install from source:
 
 ```bash
@@ -35,7 +37,7 @@ pip install .
 ### Server Example
 
 ```python
-from socketflow import TcpServer
+from socketflow import TcpServer, EventType
 
 # Create server
 server = TcpServer(
@@ -47,7 +49,7 @@ server = TcpServer(
 )
 
 # Register event handler
-@server.event("message")
+@server.event(EventType.Server.MESSAGE)
 def handle_message(data):
     print(f"Received: {data}")
     return "Response"
@@ -60,7 +62,7 @@ server.wait()  # Keep server running
 ### Client Example
 
 ```python
-from socketflow import TcpClient
+from socketflow import TcpClient, EventType
 
 # Create client
 client = TcpClient(
@@ -75,7 +77,7 @@ client = TcpClient(
 client.connect()
 
 # Register event handler
-@client.event("message")
+@client.event(EventType.Client.MESSAGE)
 def handle_message(data):
     print(f"Received: {data}")
 
@@ -154,21 +156,21 @@ client.disconnect()
 
 ### Server Events
 
-- `Server.START` - Server started
-- `Server.STOP` - Server stopped
-- `Server.CLIENT_CONNECT` - Client connected
-- `Server.CLIENT_DISCONNECT` - Client disconnected
-- `Server.MESSAGE` - Message received from client
+- `EventType.Server.START` - Server started
+- `EventType.Server.STOP` - Server stopped
+- `EventType.Server.CLIENT_CONNECT` - Client connected
+- `EventType.Server.CLIENT_DISCONNECT` - Client disconnected
+- `EventType.Server.MESSAGE` - Message received from client
 
 ### Client Events
 
-- `Client.CONNECT` - Connected to server
-- `Client.DISCONNECT` - Disconnected from server
-- `Client.MESSAGE` - Message received from server
+- `EventType.Client.CONNECT` - Connected to server
+- `EventType.Client.DISCONNECT` - Disconnected from server
+- `EventType.Client.MESSAGE` - Message received from server
 
 ### Global Events
 
-- `Global.ERROR` - Error occurred
+- `EventType.Global.ERROR` - Error occurred
 
 ## Path-Based Routing
 
