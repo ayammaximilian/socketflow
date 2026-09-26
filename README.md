@@ -51,8 +51,10 @@ server = TcpServer(
 # Register event handler
 @server.event(EventType.Server.MESSAGE)
 def handle_message(data):
-    print(f"Received: {data}")
-    return "Response"
+    print(f"Received: {data.data}")
+    # Handlers do NOT reply by returning. Send the reply explicitly,
+    # echoing the data_id so the caller can match it to its request.
+    server.send_client(data.client_addr, "Response", data.data_id)
 
 # Start server
 server.start()
@@ -73,21 +75,52 @@ client = TcpClient(
     compress=True
 )
 
+# Register event handler BEFORE connecting
+@client.event(EventType.Client.MESSAGE)
+def handle_message(data):
+    # Only reached for messages sent without wait_response.
+    print(f"Received: {data.data}")
+
 # Connect to server
 client.connect()
 
-# Register event handler
-@client.event(EventType.Client.MESSAGE)
-def handle_message(data):
-    print(f"Received: {data}")
-
-# Send message
-response = client.send("Hello, Server!", wait_response=True)
-print(f"Server response: {response}")
+# Send message and wait for the reply
+response = client.send("Hello, Server!", wait_response=True, wait_response_timeout=5)
+print(f"Server response: {response.data}")
 
 # Disconnect
 client.disconnect()
 ```
+
+Output:
+
+```
+Received: Hello, Server!
+Server response: Response
+```
+
+### How replies work
+
+This trips people up, so it is worth being explicit:
+
+| You want | Do this |
+|---|---|
+| Server answers a request | `server.send_client(data.client_addr, reply, data.data_id)` |
+| Client waits for the answer | `client.send(msg, wait_response=True)` |
+| Fire and forget, no answer | `client.send(msg)` |
+| Client handles messages on its own | `@client.event(EventType.Client.MESSAGE)` |
+
+Two things to remember:
+
+- **Returning a value from a handler does nothing.** Handlers must call
+  `send_client` (or `send_client_async`) to reply.
+- **A reply that matches a pending `wait_response` request never reaches
+  `Client.MESSAGE`.** It resolves the `send()` call instead. Your event handler
+  only sees messages that nobody was waiting for.
+
+If the server never replies, `wait_response=True` raises `NoResponse` once
+`wait_response_timeout` expires rather than hanging forever. Always pass a timeout.
+
 
 ## Non-Blocking Request/Reply
 
