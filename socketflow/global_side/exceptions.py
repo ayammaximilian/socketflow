@@ -27,6 +27,12 @@ class ConnectionTimeout(SocketFlowException):
     pass
 
 
+class ConnectionError(SocketFlowException):
+    """Raised when connection error occurs"""
+
+    pass
+
+
 class KeepaliveTimeout(SocketFlowException):
     """Raised when keepalive timeout occurs"""
 
@@ -41,6 +47,12 @@ class InvalidData(SocketFlowException):
 
 class ProtocolError(SocketFlowException):
     """Raised when protocol error occurs"""
+
+    pass
+
+
+class ProtocolVersionError(SocketFlowException):
+    """Raised when the client and server do not share a usable protocol version"""
 
     pass
 
@@ -81,6 +93,30 @@ class DispatcherError(SocketFlowException):
     pass
 
 
+class Backpressure(SocketFlowException):
+    """Raised when an outbound or dispatch queue has reached its limit."""
+
+    pass
+
+
+class AuthenticationError(SocketFlowException):
+    """Raised when connection authentication fails."""
+
+    pass
+
+
+class TlsError(SocketFlowException):
+    """Raised when TLS setup or certificate verification fails."""
+
+    pass
+
+
+class HandshakeError(AuthenticationError):
+    """Raised when the connection security handshake fails."""
+
+    pass
+
+
 # Namespace for grouped exception access
 class ExceptionType:
     """Namespace for all exception types"""
@@ -92,9 +128,15 @@ class ExceptionType:
     KeepaliveTimeout = KeepaliveTimeout
     InvalidData = InvalidData
     ProtocolError = ProtocolError
+    ProtocolVersionError = ProtocolVersionError
     ServerError = ServerError
     ClientError = ClientError
     BlueprintError = BlueprintError
     CompressionError = CompressionError
     MessageHandlerError = MessageHandlerError
     DispatcherError = DispatcherError
+    Backpressure = Backpressure
+    AuthenticationError = AuthenticationError
+    TlsError = TlsError
+    HandshakeError = HandshakeError
+    ConnectionError = ConnectionError

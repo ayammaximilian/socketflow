@@ -1,5 +1,5 @@
 import struct
-from typing import Any
+from typing import Any, Tuple
 import json
 
 
@@ -35,7 +35,7 @@ class MessageManager:
 
         return b"".join(encoded_parts)
 
-    def encode_with_length(self, *messages: Any) -> tuple[bytes, bytes]:
+    def encode_with_length(self, *messages: Any) -> Tuple[bytes, bytes]:
         encoded_payload = self.encode(*messages)
         length_bytes = struct.pack(">I", len(encoded_payload))
         return length_bytes, encoded_payload

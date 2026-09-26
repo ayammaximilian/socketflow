@@ -4,16 +4,21 @@ from .compression import MultiCompressor
 
 class MessageHandler:
     @staticmethod
-    def unpack_data(encoded_message):
+    def unpack_data(
+        encoded_message, allow_pickle=False, max_decompressed_size=None
+    ):
         try:
             data = message_manager.decode(encoded_message)
             headers = data[0]
             body = data[1] if len(data) > 1 else None
             if headers.get("compressed") and headers.get("type") == "__user__":
-                body = MultiCompressor.decompress(body)
+                body = MultiCompressor.decompress(
+                    body,
+                    allow_pickle=allow_pickle,
+                    max_output_size=max_decompressed_size,
+                )
             return headers, body
-        except Exception as e:
-            print(e)
+        except Exception:
             return None, None
 
     @staticmethod

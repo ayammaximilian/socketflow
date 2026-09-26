@@ -1,4 +1,4 @@
-from typing import Dict, List, Callable, Optional
+from typing import Any, Dict, List, Callable, Optional
 from .exceptions import ExceptionType
 
 
@@ -8,6 +8,7 @@ class Blueprint:
         self._event_handlers: Dict[str, List[Callable]] = {}
         self._path_handlers: Dict[str, List[Callable]] = {}
         self._path_middleware: Dict[str, List[Callable]] = {}
+        self._path_blocking: Dict[str, bool] = {}
 
     def event(self, event_type: str):
         """Decorator for event handlers"""
@@ -18,11 +19,11 @@ class Blueprint:
 
         return decorator
 
-    def path(self, path: str, middleware=None):
+    def path(self, path: str, middleware=None, block: bool = False):
         """Decorator for path handlers"""
 
         def decorator(func):
-            self.register_path(path, func, middleware)
+            self.register_path(path, func, middleware, block)
             return func
 
         return decorator
@@ -33,7 +34,7 @@ class Blueprint:
             self._event_handlers[event_type] = []
         self._event_handlers[event_type].append(handler)
 
-    def register_path(self, path: str, handler: Callable, middleware=None):
+    def register_path(self, path: str, handler: Callable, middleware=None, block: bool = False):
         """Register a path handler"""
         if path not in self._path_handlers:
             self._path_handlers[path] = []
@@ -48,6 +49,10 @@ class Blueprint:
             else:
                 self._path_middleware[path].append(middleware)
 
+        # Store blocking
+        if block:
+            self._path_blocking[path] = True
+
     def register_with_dispatcher(self, dispatcher):
         """Register all handlers with a dispatcher"""
         for event_type, handlers in self._event_handlers.items():
@@ -56,9 +61,10 @@ class Blueprint:
 
         for path, handlers in self._path_handlers.items():
             for handler in handlers:
-                # Get middleware for this path
+                # Get middleware and blocking for this path
                 middleware = self._path_middleware.get(path, [])
-                dispatcher.register_path(path, handler, middleware)
+                block = self._path_blocking.get(path, False)
+                dispatcher.register_path(path, handler, middleware, block)
 
     def is_connected(self, client_addr: tuple = None):
         if hasattr(self, "_client") and self._client:
@@ -74,7 +80,7 @@ class Blueprint:
 
     def send(
         self,
-        data: bytes,
+        data: Any,
         data_id: Optional[str] = None,
         path: Optional[str] = None,
         wait_response: bool = False,
@@ -90,7 +96,7 @@ class Blueprint:
     def send_client(
         self,
         client_addr: tuple,
-        data: bytes,
+        data: Any,
         data_id: Optional[str] = None,
         path: Optional[str] = None,
         wait_response: bool = False,
@@ -100,6 +106,33 @@ class Blueprint:
         if hasattr(self, "_server") and self._server:
             return self._server.send_client(
                 client_addr, data, data_id, path, wait_response, wait_response_timeout
+            )
+        raise ExceptionType.BlueprintError("Blueprint not registered with server")
+
+    def send_async(
+        self,
+        data: Any,
+        data_id: Optional[str] = None,
+        path: Optional[str] = None,
+        timeout: Optional[float] = 30.0,
+    ):
+        """Send a message without blocking and return a request handle."""
+        if hasattr(self, "_client") and self._client:
+            return self._client.send_async(data, data_id, path, timeout)
+        raise ExceptionType.BlueprintError("Blueprint not registered with client")
+
+    def send_client_async(
+        self,
+        client_addr: tuple,
+        data: Any,
+        data_id: Optional[str] = None,
+        path: Optional[str] = None,
+        timeout: Optional[float] = 30.0,
+    ):
+        """Send to a client without blocking and return a request handle."""
+        if hasattr(self, "_server") and self._server:
+            return self._server.send_client_async(
+                client_addr, data, data_id, path, timeout
             )
         raise ExceptionType.BlueprintError("Blueprint not registered with server")
 
