@@ -93,6 +93,12 @@ class DispatcherError(SocketFlowException):
     pass
 
 
+class PathNotFound(SocketFlowException):
+    """Raised when no handler is registered for an incoming path"""
+
+    pass
+
+
 class Backpressure(SocketFlowException):
     """Raised when an outbound or dispatch queue has reached its limit."""
 
@@ -135,6 +141,7 @@ class ExceptionType:
     CompressionError = CompressionError
     MessageHandlerError = MessageHandlerError
     DispatcherError = DispatcherError
+    PathNotFound = PathNotFound
     Backpressure = Backpressure
     AuthenticationError = AuthenticationError
     TlsError = TlsError

@@ -37,12 +37,14 @@ class MessageReceivedData:
     params: Dict[str, str] = field(default_factory=dict)
     direct_response: bool = False
     client_identity: Optional[str] = None
+    status_code: int = 200
 
 
 @dataclass
 class ResponseData:
     data: Any
     data_id: Optional[str] = None
+    status_code: int = 200
 
 
 @dataclass

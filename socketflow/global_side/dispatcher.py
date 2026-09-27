@@ -5,6 +5,7 @@ import threading
 import time
 
 from .exceptions import ExceptionType
+from .event import ErrorData, EventType
 
 
 class EventDispatcher:
@@ -13,6 +14,7 @@ class EventDispatcher:
         max_workers: int = 32,
         max_pending_tasks: int = 1000,
         queue_timeout: float = 1.0,
+        owner: Any = None,
     ):
         if max_workers < 1 or max_pending_tasks < 1:
             raise ValueError("Dispatcher limits must be positive")
@@ -45,6 +47,7 @@ class EventDispatcher:
         self._path_pattern_blocking: Dict[str, bool] = {}  
         self._server = None
         self._client = None
+        self.owner = owner
 
     def _run_task(self, callback):
         try:
@@ -221,6 +224,66 @@ class EventDispatcher:
 
         self._submit(_run_handlers)
 
+    def _send_auto_reply(self, data, payload, status_code):
+        """Answer a waiting caller on their own data_id, if we can."""
+        if not getattr(data, "direct_response", False):
+            return
+        data_id = getattr(data, "data_id", None)
+        if not data_id or self.owner is None:
+            return
+        try:
+            if hasattr(self.owner, "send_client"):
+                self.owner.send_client(
+                    data.client_addr, payload, data_id, status_code=status_code
+                )
+            elif hasattr(self.owner, "send"):
+                self.owner.send(payload, data_id=data_id, status_code=status_code)
+        except Exception:
+            pass
+
+    def _report_handler_error(self, path, data, error):
+        """Log a failed path handler and answer the caller with a 500."""
+        try:
+            self.emit(
+                EventType.Global.ERROR,
+                ErrorData(error=error, context=f"path:{path}"),
+            )
+        except Exception:
+            pass
+
+        self._send_auto_reply(
+            data,
+            {
+                "error": "Internal Server Error",
+                "detail": f"{type(error).__name__}: {error}",
+            },
+            500,
+        )
+
+    def _report_no_route(self, path, data):
+        """Answer the caller with a 404 when no handler matches the path."""
+        try:
+            self.emit(
+                EventType.Global.ERROR,
+                ErrorData(
+                    error=ExceptionType.PathNotFound(
+                        f"No handler registered for path {path!r}"
+                    ),
+                    context=f"path:{path}",
+                ),
+            )
+        except Exception:
+            pass
+
+        self._send_auto_reply(
+            data,
+            {
+                "error": "Not Found",
+                "detail": f"No handler registered for path {path!r}",
+            },
+            404,
+        )
+
     def emit_path(self, path: str, data: Any):
         """Emit path event"""
 
@@ -253,7 +316,9 @@ class EventDispatcher:
                         is_blocking = self._path_pattern_blocking.get(pat_str, False)
                         break
                 else:
-                    return  # No matching path or pattern
+                    # No matching path or pattern
+                    self._report_no_route(path, data)
+                    return
 
             # Check if blocking is enabled for this path and we have a client ID
             lock = None
@@ -279,8 +344,9 @@ class EventDispatcher:
                             return
                         elif result is not None:  # Middleware modified the data
                             current_data = result
-                    except Exception:
+                    except Exception as e:
                         # Middleware failed, don't proceed to handlers
+                        self._report_handler_error(path, current_data, e)
                         return
 
                 # Run path handlers
@@ -294,8 +360,8 @@ class EventDispatcher:
                                 handler(current_data)
                         else:
                             handler(current_data)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self._report_handler_error(path, current_data, e)
             finally:
                 # Release lock if we acquired one
                 if lock:

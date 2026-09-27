@@ -85,11 +85,17 @@ class Blueprint:
         path: Optional[str] = None,
         wait_response: bool = False,
         wait_response_timeout: Optional[float] = 30.0,
+        status_code: int = 200,
     ):
         """Send message from client (for blueprints)"""
         if hasattr(self, "_client") and self._client:
             return self._client.send(
-                data, data_id, path, wait_response, wait_response_timeout
+                data,
+                data_id,
+                path,
+                wait_response,
+                wait_response_timeout,
+                status_code,
             )
         raise ExceptionType.BlueprintError("Blueprint not registered with client")
 
@@ -101,11 +107,18 @@ class Blueprint:
         path: Optional[str] = None,
         wait_response: bool = False,
         wait_response_timeout: Optional[float] = 30.0,
+        status_code: int = 200,
     ):
         """Send message to client (for blueprints)"""
         if hasattr(self, "_server") and self._server:
             return self._server.send_client(
-                client_addr, data, data_id, path, wait_response, wait_response_timeout
+                client_addr,
+                data,
+                data_id,
+                path,
+                wait_response,
+                wait_response_timeout,
+                status_code,
             )
         raise ExceptionType.BlueprintError("Blueprint not registered with server")
 
@@ -115,10 +128,13 @@ class Blueprint:
         data_id: Optional[str] = None,
         path: Optional[str] = None,
         timeout: Optional[float] = 30.0,
+        status_code: int = 200,
     ):
         """Send a message without blocking and return a request handle."""
         if hasattr(self, "_client") and self._client:
-            return self._client.send_async(data, data_id, path, timeout)
+            return self._client.send_async(
+                data, data_id, path, timeout, status_code
+            )
         raise ExceptionType.BlueprintError("Blueprint not registered with client")
 
     def send_client_async(
@@ -128,11 +144,12 @@ class Blueprint:
         data_id: Optional[str] = None,
         path: Optional[str] = None,
         timeout: Optional[float] = 30.0,
+        status_code: int = 200,
     ):
         """Send to a client without blocking and return a request handle."""
         if hasattr(self, "_server") and self._server:
             return self._server.send_client_async(
-                client_addr, data, data_id, path, timeout
+                client_addr, data, data_id, path, timeout, status_code
             )
         raise ExceptionType.BlueprintError("Blueprint not registered with server")
 

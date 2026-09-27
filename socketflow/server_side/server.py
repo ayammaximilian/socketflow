@@ -330,6 +330,13 @@ class TcpServerProtocol:
                     self.handle_connection_lost()
                     break
             elif msg_type == "__user__":
+                if (
+                    self.server.allow_legacy_clients
+                    and not self.server.auth_required
+                ):
+                    if not self._handshake_completed:
+                        self._handshake_completed = True
+                        self._notify_connected()
                 if not self._authenticated or not self._handshake_completed:
                     self._send_auth_result(False, "Authentication required")
                     self._writer.close(timeout=1)
@@ -338,6 +345,7 @@ class TcpServerProtocol:
                 path = headers.get("path")
                 data_id = headers.get("id")
                 wait_response = headers.get("wait_response", False)
+                status_code = headers.get("status_code", 200)
                 self.server.metrics.increment(
                     "messages_received_total", path=path or "none"
                 )
@@ -353,6 +361,7 @@ class TcpServerProtocol:
                     data_id=data_id,
                     direct_response=wait_response,
                     client_identity=self.client_identity,
+                    status_code=status_code,
                 )
 
                 # Resolve pending wait_response futures
@@ -363,7 +372,11 @@ class TcpServerProtocol:
                 )
                 if future is not None:
                     if not future.done():
-                        future.set_result(ResponseData(data=body, data_id=data_id))
+                        future.set_result(
+                            ResponseData(
+                                data=body, data_id=data_id, status_code=status_code
+                            )
+                        )
                     continue
 
                 if path:
@@ -509,7 +522,6 @@ class TcpServer:
         compress: bool = True,
         keepalive_interval: float = 30.0,
         keepalive_max_missed: int = 3,
-        flow_control: bool = True,
         recv_buffer_size: int = 65536,
         send_buffer_size: int = 65536,
         max_frame_size: int = 8 * 1024 * 1024,
@@ -533,6 +545,7 @@ class TcpServer:
         auth_timeout: float = 30.0,
         require_handshake: bool = True,
         handshake_timeout: Optional[float] = None,
+        allow_legacy_clients: bool = False,
         protocol_version: Optional[int] = None,
         min_protocol_version: Optional[int] = None,
         max_protocol_version: Optional[int] = None,
@@ -600,6 +613,7 @@ class TcpServer:
             max_workers=max_dispatch_workers,
             max_pending_tasks=max_pending_tasks,
             queue_timeout=dispatch_queue_timeout,
+            owner=self,
         )
         self._server = None
         self._accept_thread = None
@@ -614,7 +628,6 @@ class TcpServer:
         self.compress = compress
         self.keepalive_interval = keepalive_interval
         self.keepalive_max_missed = keepalive_max_missed
-        self.flow_control_enabled = flow_control
         self.pending_responses = PendingResponseRegistry()
         self._request_timeouts = TimeoutScheduler()
         self.memory_budget = MemoryBudget(max_memory_bytes)
@@ -645,6 +658,10 @@ class TcpServer:
             auth_timeout if handshake_timeout is None else handshake_timeout
         )
         self.require_handshake = require_handshake
+        self.allow_legacy_clients = allow_legacy_clients
+        # 0.1.4 clients pickle their payloads; the safe JSON format is newer.
+        if allow_legacy_clients:
+            self.allow_pickle = True
         self.protocol_version = protocol_version
         self._protocol_enabled = protocol_module.is_enabled(
             protocol_version, min_protocol_version, max_protocol_version
@@ -1206,6 +1223,7 @@ class TcpServer:
         data_id: Optional[str],
         path: Optional[str],
         wait_response: bool,
+        status_code: int = 200,
     ):
         """Encode one outbound user message and return (data_id, frame)."""
         if data_id is None:
@@ -1217,6 +1235,8 @@ class TcpServer:
             "path": path,
             "wait_response": wait_response,
         }
+        if status_code != 200:
+            headers["status_code"] = status_code
 
         if self.compress:
             try:
@@ -1260,6 +1280,7 @@ class TcpServer:
         data_id: Optional[str] = None,
         path: Optional[str] = None,
         timeout: Optional[float] = 30.0,
+        status_code: int = 200,
     ) -> RequestHandle:
         """Send a request to a client and return a handle without blocking.
 
@@ -1267,7 +1288,9 @@ class TcpServer:
         ``cancel()`` and ``add_done_callback()``.
         """
         protocol = self._resolve_client_protocol(client_addr)
-        data_id, frame = self._encode_outbound(data, data_id, path, True)
+        data_id, frame = self._encode_outbound(
+            data, data_id, path, True, status_code
+        )
 
         # Register before sending because the peer can reply before send returns.
         request = RequestHandle(
@@ -1300,11 +1323,14 @@ class TcpServer:
         path: Optional[str] = None,
         wait_response: bool = False,
         wait_response_timeout: Optional[float] = 30.0,
+        status_code: int = 200,
     ):
         """Send data to a client. Blocks only when wait_response is True."""
         if not wait_response:
             protocol = self._resolve_client_protocol(client_addr)
-            data_id, frame = self._encode_outbound(data, data_id, path, False)
+            data_id, frame = self._encode_outbound(
+                data, data_id, path, False, status_code
+            )
             protocol.send(frame)
             return None
 
@@ -1314,6 +1340,7 @@ class TcpServer:
             data_id=data_id,
             path=path,
             timeout=wait_response_timeout,
+            status_code=status_code,
         )
         try:
             return request.result()
