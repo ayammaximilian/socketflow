@@ -344,6 +344,7 @@ class TcpClient:
         require_handshake: bool = True,
         handshake_timeout: Optional[float] = None,
         allow_legacy_server: bool = False,
+        legacy_probe_timeout: float = 1.0,
         max_memory_bytes: int = 64 * 1024 * 1024,
         max_decompressed_size: int = 16 * 1024 * 1024,
         protocol_version: Optional[int] = None,
@@ -425,9 +426,13 @@ class TcpClient:
         )
         self.require_handshake = require_handshake
         self.allow_legacy_server = allow_legacy_server
-        # 0.1.4 peers pickle their payloads; the safe JSON format is newer.
-        if allow_legacy_server:
-            self.allow_pickle = True
+        # 0.1.4 servers pickle their payloads and never send a handshake, so a
+        # legacy peer needs pickle in both directions. Until the peer is
+        # identified we assume legacy only because the flag asked us to; a
+        # modern server downgrades this back to the safe JSON format.
+        self.legacy_probe_timeout = legacy_probe_timeout
+        self._pickle_outbound = allow_pickle or allow_legacy_server
+        self._accept_pickle = allow_pickle or allow_legacy_server
         self._handshake_completed = False
         self.auth_token = auth_token
         self.auth_username = auth_username
@@ -513,6 +518,19 @@ class TcpClient:
             raise ExceptionType.HandshakeError(self._ready_timeout_message())
         if self._auth_error is not None:
             raise self._auth_error
+
+    def _probe_for_legacy_server(self) -> bool:
+        """Report whether the peer looks like a pre-0.2 (0.1.4) server.
+
+        A modern server announces itself with ``__server_ready__`` as soon as
+        the connection is accepted; a 0.1.4 server has no handshake at all and
+        sends nothing. A short grace period is therefore enough to tell them
+        apart, and it costs a legacy connection only a one-time connect delay.
+        """
+        grace = min(float(self.legacy_probe_timeout), float(self.handshake_timeout))
+        if grace <= 0:
+            return True
+        return not self._server_ready_event.wait(grace)
 
     def _ready_timeout_message(self) -> str:
         """Explain a failed handshake in terms the user can act on."""
@@ -645,7 +663,7 @@ class TcpClient:
                 max_frame_size=self.max_frame_size,
                 max_queue_bytes=self.max_outbound_queue_bytes,
                 max_pending_writes=self.max_pending_writes,
-                allow_pickle=self.allow_pickle,
+                allow_pickle=self._accept_pickle,
                 memory_budget=self.memory_budget,
                 max_decompressed_size=self.max_decompressed_size,
             )
@@ -658,16 +676,31 @@ class TcpClient:
                 daemon=True,
             )
             self._reader_thread.start()
-            if self.require_handshake and not self.allow_legacy_server:
-                self._wait_for_server_ready()
-            if self.auth_enabled and not self.allow_legacy_server:
-                self._send_authentication()
             if self.allow_legacy_server:
-                self._handshake_completed = True
-            elif self.require_handshake:
-                self._wait_for_authentication()
-            elif self.auth_enabled:
-                self._wait_for_authentication()
+                if self._probe_for_legacy_server():
+                    # Genuine 0.1.x peer: no handshake exists, and only pickle
+                    # payloads are understood.
+                    self._pickle_outbound = True
+                    self._handshake_completed = True
+                else:
+                    # The peer speaks the current protocol after all, so send
+                    # it the safe JSON format and run the normal handshake.
+                    self._pickle_outbound = self.allow_pickle
+                    if self.require_handshake:
+                        if self.auth_enabled:
+                            self._send_authentication()
+                        self._wait_for_authentication()
+                    else:
+                        self._handshake_completed = True
+            else:
+                if self.require_handshake:
+                    self._wait_for_server_ready()
+                if self.auth_enabled:
+                    self._send_authentication()
+                if self.require_handshake:
+                    self._wait_for_authentication()
+                elif self.auth_enabled:
+                    self._wait_for_authentication()
 
             self.dispatcher.emit(
                 EventType.Client.CONNECT,
@@ -803,7 +836,7 @@ class TcpClient:
                     data,
                     method=self.compression_type,
                     level=self.compression_level,
-                    allow_pickle=self.allow_pickle,
+                    allow_pickle=self._pickle_outbound,
                 )
                 headers["compressed"] = True
                 length_bytes, encoded_message = message_manager.encode_with_length(

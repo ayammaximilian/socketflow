@@ -70,6 +70,9 @@ class TcpServerProtocol:
         self.protocol_version = None
         self.client_identity = None
         self.client_cert_valid = None
+        # Set when a peer sends application data without the handshake, which
+        # is how a pre-0.2 (0.1.4) client is identified on the wire.
+        self._legacy_peer = False
         self._authenticated = not server.auth_required
         self._handshake_completed = not server.require_handshake
         self._auth_deadline = None
@@ -77,6 +80,15 @@ class TcpServerProtocol:
         self._writer = None
         self._max_queue_bytes = max_queue_bytes
         self._max_pending_writes = max_pending_writes
+
+    @property
+    def outbound_pickle(self) -> bool:
+        """Whether this connection must encode payloads as pickle.
+
+        Only a peer that skipped the handshake can require it; every
+        negotiated client expects the safe JSON format.
+        """
+        return self.server.allow_pickle or self._legacy_peer
 
     def _read_client_identity(self):
         """Read the peer certificate identity for mutual TLS.
@@ -333,10 +345,14 @@ class TcpServerProtocol:
                 if (
                     self.server.allow_legacy_clients
                     and not self.server.auth_required
+                    and not self._handshake_completed
                 ):
-                    if not self._handshake_completed:
-                        self._handshake_completed = True
-                        self._notify_connected()
+                    # Application data arriving before the handshake is the
+                    # wire signal for a pre-0.2 (0.1.4) peer, which can only
+                    # decode pickled payloads.
+                    self._legacy_peer = True
+                    self._handshake_completed = True
+                    self._notify_connected()
                 if not self._authenticated or not self._handshake_completed:
                     self._send_auth_result(False, "Authentication required")
                     self._writer.close(timeout=1)
@@ -659,9 +675,11 @@ class TcpServer:
         )
         self.require_handshake = require_handshake
         self.allow_legacy_clients = allow_legacy_clients
-        # 0.1.4 clients pickle their payloads; the safe JSON format is newer.
-        if allow_legacy_clients:
-            self.allow_pickle = True
+        # 0.1.4 clients pickle their payloads, so accept them on the way in.
+        # This only widens what we decode; outbound frames stay in the safe
+        # JSON format unless the peer turns out to be a legacy client, or the
+        # caller explicitly opted into pickle via allow_pickle.
+        self._accept_pickle = allow_pickle or allow_legacy_clients
         self.protocol_version = protocol_version
         self._protocol_enabled = protocol_module.is_enabled(
             protocol_version, min_protocol_version, max_protocol_version
@@ -771,7 +789,7 @@ class TcpServer:
             max_frame_size=self.max_frame_size,
             max_queue_bytes=self.max_outbound_queue_bytes,
             max_pending_writes=self.max_pending_writes,
-            allow_pickle=self.allow_pickle,
+            allow_pickle=self._accept_pickle,
             memory_budget=self.memory_budget,
             max_decompressed_size=self.max_decompressed_size,
         )
@@ -907,7 +925,7 @@ class TcpServer:
                 max_frame_size=self.max_frame_size,
                 max_queue_bytes=self.max_outbound_queue_bytes,
                 max_pending_writes=self.max_pending_writes,
-                allow_pickle=self.allow_pickle,
+                allow_pickle=self._accept_pickle,
                 memory_budget=self.memory_budget,
                 max_decompressed_size=self.max_decompressed_size,
             )
@@ -1224,8 +1242,13 @@ class TcpServer:
         path: Optional[str],
         wait_response: bool,
         status_code: int = 200,
+        allow_pickle: bool = False,
     ):
-        """Encode one outbound user message and return (data_id, frame)."""
+        """Encode one outbound user message and return (data_id, frame).
+
+        ``allow_pickle`` comes from the target connection: a legacy peer
+        needs pickle, a negotiated one needs the safe JSON format.
+        """
         if data_id is None:
             data_id = str(uuid.uuid4())
 
@@ -1244,7 +1267,7 @@ class TcpServer:
                     data,
                     method=self.compression_type,
                     level=self.compression_level,
-                    allow_pickle=self.allow_pickle,
+                    allow_pickle=allow_pickle,
                 )
                 headers["compressed"] = True
                 length_bytes, encoded_message = message_manager.encode_with_length(
@@ -1289,7 +1312,7 @@ class TcpServer:
         """
         protocol = self._resolve_client_protocol(client_addr)
         data_id, frame = self._encode_outbound(
-            data, data_id, path, True, status_code
+            data, data_id, path, True, status_code, protocol.outbound_pickle
         )
 
         # Register before sending because the peer can reply before send returns.
@@ -1329,7 +1352,7 @@ class TcpServer:
         if not wait_response:
             protocol = self._resolve_client_protocol(client_addr)
             data_id, frame = self._encode_outbound(
-                data, data_id, path, False, status_code
+                data, data_id, path, False, status_code, protocol.outbound_pickle
             )
             protocol.send(frame)
             return None
