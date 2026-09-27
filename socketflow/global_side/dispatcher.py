@@ -1,8 +1,9 @@
-from typing import Dict, List, Callable, Any, Optional, Tuple
+from typing import Dict, List, Callable, Any, Optional, Tuple, Deque
 import concurrent.futures
 import re
 import threading
 import time
+from collections import deque
 
 from .exceptions import ExceptionType
 from .event import ErrorData, EventType
@@ -38,10 +39,15 @@ class EventDispatcher:
         self._path_blocking: Dict[
             str, bool
         ] = {}
-        self._path_locks: Dict[
-            Tuple[str, Tuple], threading.Lock
-        ] = {}  
-        self._path_patterns: List[Tuple[str, re.Pattern, List[str]]] = [] 
+        # Blocking paths are serialised per (path, client) with a queue rather
+        # than a lock. A lock makes every waiting message hold a worker thread,
+        # so one busy client can exhaust the pool and stall everyone else. One
+        # worker draining a queue keeps the backlog off the pool entirely.
+        self._serial_lock = threading.Lock()
+        self._serial_queues: Dict[Tuple[str, Any], Deque[Callable]] = {}
+        self._serial_active: set = set()
+        self._max_pending_tasks = max_pending_tasks
+        self._path_patterns: List[Tuple[str, re.Pattern, List[str]]] = []
         self._path_pattern_handlers: Dict[str, List[Callable]] = {} 
         self._path_pattern_middleware: Dict[str, List[Callable]] = {} 
         self._path_pattern_blocking: Dict[str, bool] = {}  
@@ -284,90 +290,124 @@ class EventDispatcher:
             404,
         )
 
+    def _enqueue_serial(self, key, job: Callable) -> None:
+        """Queue one job to run alone on ``key``, starting a worker if needed.
+
+        Only the first job for a key starts a drainer. That drainer stays on
+        the pool for the whole backlog, so waiting messages cost queue space
+        instead of a blocked worker thread. Jobs run in arrival order.
+        """
+        with self._serial_lock:
+            pending = self._serial_queues.get(key)
+            if pending is None:
+                pending = deque()
+                self._serial_queues[key] = pending
+            if len(pending) >= self._max_pending_tasks:
+                raise ExceptionType.DispatcherError(
+                    "Dispatch queue is full; the application is not keeping up"
+                )
+            pending.append(job)
+            if key in self._serial_active:
+                return
+            self._serial_active.add(key)
+
+        self._submit(self._make_drainer(key))
+
+    def _make_drainer(self, key) -> Callable:
+        def _drain():
+            while True:
+                with self._serial_lock:
+                    pending = self._serial_queues.get(key)
+                    if not pending:
+                        self._serial_queues.pop(key, None)
+                        self._serial_active.discard(key)
+                        return
+                    job = pending.popleft()
+                # _dispatch handles its own errors, so a failing job must not
+                # strand the rest of this key's backlog.
+                try:
+                    job()
+                except Exception:
+                    pass
+
+        return _drain
+
     def emit_path(self, path: str, data: Any):
         """Emit path event"""
+        # Extract client identifier for blocking
+        client_id = None
+        if hasattr(data, "client_addr") and data.client_addr:
+            client_id = data.client_addr
+        elif hasattr(data, "server_addr") and data.server_addr:
+            client_id = data.server_addr
 
-        def _run_path_handlers():
-            # Extract client identifier for blocking
-            client_id = None
-            if hasattr(data, "client_addr") and data.client_addr:
-                client_id = data.client_addr
-            elif hasattr(data, "server_addr") and data.server_addr:
-                client_id = data.server_addr
+        # Try exact match first, then pattern matching
+        matched_pattern = None
+        params = {}
 
-            # Try exact match first, then pattern matching
-            matched_pattern = None
-            params = {}
-
-            if path in self._path_handlers:
-                # Exact match found
-                handlers = self._path_handlers[path]
-                middleware_list = self._path_middleware.get(path, [])
-                is_blocking = self._path_blocking.get(path, False)
+        if path in self._path_handlers:
+            # Exact match found
+            handlers = self._path_handlers[path]
+            middleware_list = self._path_middleware.get(path, [])
+            is_blocking = self._path_blocking.get(path, False)
+        else:
+            # Try pattern matching
+            for pat_str, regex, param_names in self._path_patterns:
+                m = regex.match(path)
+                if m:
+                    matched_pattern = pat_str
+                    params = m.groupdict()
+                    handlers = self._path_pattern_handlers.get(pat_str, [])
+                    middleware_list = self._path_pattern_middleware.get(pat_str, [])
+                    is_blocking = self._path_pattern_blocking.get(pat_str, False)
+                    break
             else:
-                # Try pattern matching
-                for pat_str, regex, param_names in self._path_patterns:
-                    m = regex.match(path)
-                    if m:
-                        matched_pattern = pat_str
-                        params = m.groupdict()
-                        handlers = self._path_pattern_handlers.get(pat_str, [])
-                        middleware_list = self._path_pattern_middleware.get(pat_str, [])
-                        is_blocking = self._path_pattern_blocking.get(pat_str, False)
-                        break
-                else:
-                    # No matching path or pattern
-                    self._report_no_route(path, data)
+                # No matching path or pattern. Route lookup happens here, on
+                # the reader thread, so queue the reply off-thread.
+                self._submit(lambda: self._report_no_route(path, data))
+                return
+
+        def _dispatch():
+            # Run middleware first
+            current_data = data
+            for middleware_func in middleware_list:
+                try:
+                    result = middleware_func(current_data)
+                    if result is False:  # Middleware rejected the request
+                        return
+                    elif result is not None:  # Middleware modified the data
+                        current_data = result
+                except Exception as e:
+                    # Middleware failed, don't proceed to handlers
+                    self._report_handler_error(path, current_data, e)
                     return
 
-            # Check if blocking is enabled for this path and we have a client ID
-            lock = None
-            if is_blocking and client_id:
-                # Use the pattern string for parameterized paths so all dynamic
-                # paths sharing the same pattern (e.g. /slow/1, /slow/2 for
-                # /slow/<id>) share one lock per client.
-                lock_path = matched_pattern if matched_pattern else path
-                lock_key = (lock_path, client_id)
-                # Get or create lock for this client-path combination
-                if lock_key not in self._path_locks:
-                    self._path_locks[lock_key] = threading.Lock()
-                lock = self._path_locks[lock_key]
-                lock.acquire()
-
-            try:
-                # Run middleware first
-                current_data = data
-                for middleware_func in middleware_list:
-                    try:
-                        result = middleware_func(current_data)
-                        if result is False:  # Middleware rejected the request
-                            return
-                        elif result is not None:  # Middleware modified the data
-                            current_data = result
-                    except Exception as e:
-                        # Middleware failed, don't proceed to handlers
-                        self._report_handler_error(path, current_data, e)
-                        return
-
-                # Run path handlers
-                for handler in handlers:
-                    try:
-                        if params:
-                            try:
-                                handler(current_data, **params)
-                            except TypeError:
-                                # Handler doesn't accept kwargs, pass without params
-                                handler(current_data)
-                        else:
+            # Run path handlers
+            for handler in handlers:
+                try:
+                    if params:
+                        try:
+                            handler(current_data, **params)
+                        except TypeError:
+                            # Handler doesn't accept kwargs, pass without params
                             handler(current_data)
-                    except Exception as e:
-                        self._report_handler_error(path, current_data, e)
-            finally:
-                # Release lock if we acquired one
-                if lock:
-                    lock.release()
+                    else:
+                        handler(current_data)
+                except Exception as e:
+                    self._report_handler_error(path, current_data, e)
 
-        self._submit(_run_path_handlers)
+        if not is_blocking or not client_id:
+            self._submit(_dispatch)
+            return
+
+        # Enqueue here rather than inside a worker: this runs on the reader
+        # thread in arrival order, so a key's queue really is FIFO. Enqueuing
+        # from a worker would let tasks race and reorder themselves.
+        # Use the pattern string for parameterized paths so all dynamic
+        # paths sharing the same pattern (e.g. /slow/1, /slow/2 for
+        # /slow/<id>) share one queue per client.
+        lock_path = matched_pattern if matched_pattern else path
+        self._enqueue_serial((lock_path, client_id), _dispatch)
 
     def register_blueprint(self, blueprint):
         """Register a blueprint"""

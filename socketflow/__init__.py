@@ -34,7 +34,7 @@ from .global_side.protocol import (
     MAX_PROTOCOL_VERSION,
 )
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 __all__ = [
     "TcpServer",
     "TcpClient",
